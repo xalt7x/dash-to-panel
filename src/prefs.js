@@ -43,7 +43,7 @@ const DEFAULT_FONT_SIZES = [96, 64, 48, 32, 24, 16, 0]
 const DEFAULT_MARGIN_SIZES = [32, 24, 16, 12, 8, 4, 0]
 const DEFAULT_PADDING_SIZES = [32, 24, 16, 12, 8, 4, 0, -1]
 // Minimum length could be 0, but a higher value may help prevent confusion about where the panel went.
-const LENGTH_MARKS = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10]
+const LENGTH_MARKS = [100, 90, 80, 70, 60, 50, 40, 30, 20]
 const MAX_WINDOW_INDICATOR = 4
 
 const SCHEMA_PATH = '/org/gnome/shell/extensions/dash-to-panel/'
@@ -235,6 +235,7 @@ const Preferences = class {
     this._dot_height_timeout = 0
     this._tray_size_timeout = 0
     this._leftbox_size_timeout = 0
+    this._globalBorderRadius_margin_timeout = 0
     this._appicon_margin_timeout = 0
     this._appicon_margin_todesktop_timeout = 0
     this._appicon_margin_toscreenborder_timeout = 0
@@ -426,28 +427,50 @@ const Preferences = class {
     panel_size_scale.set_value(size)
 
     const panel_length_scale = this._builder.get_object('panel_length_scale')
+    const dynamicLengthButton = this._builder.get_object(
+      'panel_length_dynamic_button',
+    )
     const length = PanelSettings.getPanelLength(this._settings, monitorIndex)
-    panel_length_scale.set_value(length)
-    this._setAnchorWidgetSensitivity(length)
+    const isDynamicLength = length == -1
+
+    dynamicLengthButton.set_active(isDynamicLength)
+    panel_length_scale.set_value(isDynamicLength ? 100 : length)
 
     this._setAnchorLabels(monitorIndex)
 
     // Update display of panel content settings
     this._displayPanelPositionsForMonitor(monitorIndex)
+
+    this._setPanelLenghtWidgetSensitivity(length)
   }
 
   /**
    * Anchor is only relevant if panel length is less than 100%. Enable or disable
    * anchor widget sensitivity accordingly.
    */
-  _setAnchorWidgetSensitivity(panelLength) {
+  _setPanelLenghtWidgetSensitivity(panelLength) {
+    const taskbarListBox = this._builder.get_object('taskbar_display_listbox')
+    let i = 0
+    let row
+    const isDynamicLength = panelLength == -1
     const isPartialLength = panelLength < 100
+
+    this._builder
+      .get_object('panel_length_scale')
+      .set_sensitive(!isDynamicLength)
     this._builder
       .get_object('panel_anchor_label')
       .set_sensitive(isPartialLength)
     this._builder
       .get_object('panel_anchor_combo')
       .set_sensitive(isPartialLength)
+
+    while ((row = taskbarListBox.get_row_at_index(i++)) != null) {
+      let grid = row.get_child()
+      let positionCombo = grid.get_child_at(4, 0)
+
+      positionCombo.set_sensitive(!isDynamicLength)
+    }
   }
 
   _displayPanelPositionsForMonitor(monitorIndex) {
@@ -800,6 +823,12 @@ const Preferences = class {
       })
 
     // style
+    this._builder
+      .get_object('global_border_radius_scale')
+      .set_format_value_func((scale, value) => {
+        return value * 4 + ' px'
+      })
+
     this._builder
       .get_object('appicon_margin_scale')
       .set_format_value_func((scale, value) => {
@@ -1342,9 +1371,7 @@ const Preferences = class {
       this._builder.get_object('multimon_multi_switch').set_sensitive(false)
     }
 
-    const panel_length_scale = this._builder.get_object('panel_length_scale')
-    panel_length_scale.connect('value-changed', (widget) => {
-      const value = widget.get_value()
+    let setPanelLength = (value) => {
       const monitorSync = this._settings.get_boolean(
         'panel-element-positions-monitors-sync',
       )
@@ -1355,7 +1382,31 @@ const Preferences = class {
         PanelSettings.setPanelLength(this._settings, monitorIndex, value)
       })
 
-      this._setAnchorWidgetSensitivity(value)
+      maybeSetPanelLengthScaleValueChange(value)
+      this._setPanelLenghtWidgetSensitivity(value)
+    }
+    let panelLengthScaleValueChangeId = 0
+    let maybeSetPanelLengthScaleValueChange = (value) => {
+      const panel_length_scale = this._builder.get_object('panel_length_scale')
+
+      if (panelLengthScaleValueChangeId) {
+        panel_length_scale.disconnect(panelLengthScaleValueChangeId)
+        panelLengthScaleValueChangeId = 0
+      }
+
+      if (value != -1) {
+        panelLengthScaleValueChangeId = panel_length_scale.connect(
+          'value-changed',
+          () => setPanelLength(panel_length_scale.get_value()),
+        )
+      } else panel_length_scale.set_value(100)
+    }
+
+    const dynamicLengthButton = this._builder.get_object(
+      'panel_length_dynamic_button',
+    )
+    dynamicLengthButton.connect('notify::active', () => {
+      setPanelLength(dynamicLengthButton.get_active() ? -1 : 100)
     })
 
     this._builder
@@ -3052,6 +3103,12 @@ const Preferences = class {
         range: DEFAULT_FONT_SIZES,
       },
       {
+        objectName: 'global_border_radius_scale',
+        valueName: 'global-border-radius',
+        range: [5, 4, 3, 2, 1, 0],
+        rangeFactor: 4,
+      },
+      {
         objectName: 'appicon_margin_scale',
         valueName: 'appicon-margin',
         range: DEFAULT_MARGIN_SIZES,
@@ -3097,20 +3154,27 @@ const Preferences = class {
     for (const idx in sizeScales) {
       let size_scale = this._builder.get_object(sizeScales[idx].objectName)
       let range = sizeScales[idx].range
+      let factor = sizeScales[idx].rangeFactor
       size_scale.set_range(range[range.length - 1], range[0])
       let value
       if (sizeScales[idx].objectName === 'panel_length_scale') {
-        value = PanelSettings.getPanelLength(
+        let length = PanelSettings.getPanelLength(
           this._settings,
           this._currentMonitorIndex,
         )
+
+        value = length == -1 ? 100 : length
       } else {
         value = this._settings.get_int(sizeScales[idx].valueName)
       }
       size_scale.set_value(value)
       // Add marks from range arrays, omitting the first and last values.
       range.slice(1, -1).forEach(function (val) {
-        size_scale.add_mark(val, Gtk.PositionType.TOP, val.toString())
+        size_scale.add_mark(
+          val,
+          Gtk.PositionType.TOP,
+          (val * (factor || 1)).toString(),
+        )
       })
 
       // Corrent for rtl languages
@@ -3124,6 +3188,10 @@ const Preferences = class {
         size_scale.set_inverted(true)
       }
     }
+
+    maybeSetPanelLengthScaleValueChange(
+      PanelSettings.getPanelLength(this._settings, this._currentMonitorIndex),
+    )
 
     this._settings.bind(
       'animate-app-switch',
@@ -3736,6 +3804,25 @@ const BuilderScope = GObject.registerClass(
         () => {
           this._preferences._settings.set_int('leftbox-size', scale.get_value())
           this._preferences._leftbox_size_timeout = 0
+          return GLib.SOURCE_REMOVE
+        },
+      )
+    }
+
+    global_border_radius_scale_value_changed_cb(scale) {
+      // Avoid settings the size consinuosly
+      if (this._preferences._globalBorderRadius_margin_timeout > 0)
+        GLib.Source.remove(this._preferences._globalBorderRadius_margin_timeout)
+
+      this._preferences._globalBorderRadius_margin_timeout = GLib.timeout_add(
+        GLib.PRIORITY_DEFAULT,
+        SCALE_UPDATE_TIMEOUT,
+        () => {
+          this._preferences._settings.set_int(
+            'global-border-radius',
+            scale.get_value(),
+          )
+          this._preferences._globalBorderRadius_margin_timeout = 0
           return GLib.SOURCE_REMOVE
         },
       )
